@@ -1,3 +1,4 @@
+from rag_system import PaperAnalysisRAG
 import os
 import streamlit as st
 
