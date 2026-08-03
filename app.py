@@ -1,3 +1,16 @@
+import streamlit as st
+
+class PaperAnalysisRAG:
+    def __init__(self, groq_api_key):
+        self.groq_api_key = groq_api_key
+        self.parsed_papers = {}
+
+    def ingest_papers(self, parsed_all):
+        self.parsed_papers = parsed_all
+
+
+
+
 from rag_system import PaperAnalysisRAG
 import os
 import streamlit as st
