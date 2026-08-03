@@ -1,32 +1,42 @@
-import streamlit as st
-
-class PaperAnalysisRAG:
-    def __init__(self, groq_api_key):
-        self.groq_api_key = groq_api_key
-        self.parsed_papers = {}
-
-    def ingest_papers(self, parsed_all):
-        self.parsed_papers = parsed_all
-
-
-
-
-from rag_system import PaperAnalysisRAG
 import os
+import tempfile
 import streamlit as st
 
-# ==============================================================================
-# 1. STREAMLIT CONFIGURATION & SESSION STATE INITIALIZATION
-# ==============================================================================
+# ============================================================
+# LangChain & Vector Store Imports
+# ============================================================
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_groq import ChatGroq
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
 st.set_page_config(
     page_title="PragyanAI Academic Paper RAG Engine",
     page_icon="📚",
     layout="wide"
 )
 
-st.title("📚 Multi-Paper Academic RAG & Research Gap Explorer")
 
-# Persistent state management across reruns
+# ============================================================
+# DEFAULT GROQ KEY
+# ============================================================
+
+DEFAULT_GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
 if "rag_system" not in st.session_state:
     st.session_state.rag_system = None
 
@@ -34,46 +44,473 @@ if "paper_list" not in st.session_state:
     st.session_state.paper_list = []
 
 if "status_msg" not in st.session_state:
-    st.session_state.status_msg = "Upload PDF files and click 'Ingest Papers' to start."
+    st.session_state.status_msg = ""
 
-# Placeholder default key if defined globally in your project
-DEFAULT_GROQ_KEY = os.getenv("GROQ_API_KEY", "")
 
-# ==============================================================================
-# 2. LOGIC & HANDLER FUNCTIONS
-# ==============================================================================
+# ============================================================
+# 1. HELPER FUNCTIONS
+# ============================================================
+
+def extract_structured_sections(file_path):
+    """
+    Parses a PDF file and extracts content by basic academic sections.
+    """
+
+    sections = {
+        "Abstract": "",
+        "Introduction": "",
+        "Related Work": "",
+        "Methodology": "",
+        "Results": "",
+        "Discussion & Gaps": "",
+        "Conclusion": "",
+        "Full Text": ""
+    }
+
+    if not os.path.exists(file_path):
+        return sections
+
+    loader = PyPDFLoader(file_path)
+    docs = loader.load()
+
+    full_text = "\n".join(
+        [doc.page_content for doc in docs]
+    )
+
+    sections["Full Text"] = full_text
+
+    # Basic chunk segmentation
+    sections["Abstract"] = full_text[:1500]
+
+    sections["Methodology"] = (
+        full_text[1500:5000]
+        if len(full_text) > 5000
+        else full_text
+    )
+
+    sections["Results"] = (
+        full_text[5000:9000]
+        if len(full_text) > 9000
+        else full_text
+    )
+
+    sections["Discussion & Gaps"] = (
+        full_text[9000:]
+        if len(full_text) > 9000
+        else full_text
+    )
+
+    return sections
+
+
+# ============================================================
+# SEARCH FUNCTIONS
+# ============================================================
+
+def search_arxiv_papers(topic):
+    """
+    Placeholder arXiv search.
+    """
+
+    return [
+        {
+            "title": f"Advances in {topic.title()}: A Comprehensive Survey",
+            "url": "https://arxiv.org",
+            "published": "2024",
+            "summary": (
+                f"Recent developments and benchmark analysis "
+                f"in {topic}."
+            )
+        },
+        {
+            "title": f"Scalable Models for {topic.title()}",
+            "url": "https://arxiv.org",
+            "published": "2025",
+            "summary": (
+                f"A novel framework for high-throughput "
+                f"execution in {topic}."
+            )
+        }
+    ]
+
+
+def search_similar_online_papers(topic):
+    """
+    Placeholder Web/OpenReview search.
+    """
+
+    return [
+        {
+            "title": f"Benchmarking {topic.title()} in Open Environments",
+            "link": "https://openreview.net",
+            "snippet": (
+                f"Empirical studies comparing state-of-the-art "
+                f"implementations of {topic}."
+            )
+        }
+    ]
+
+
+# ============================================================
+# 2. PAPER ANALYSIS RAG CLASS
+# ============================================================
+
+class PaperAnalysisRAG:
+    """
+    Core RAG engine managing embeddings,
+    FAISS vector store and Groq LLM.
+    """
+
+    def __init__(self, groq_api_key: str):
+
+        self.groq_api_key = groq_api_key
+
+        # Groq LLM
+        self.llm = ChatGroq(
+            groq_api_key=groq_api_key,
+            model_name="llama-3.3-70b-versatile",
+            temperature=0.2
+        )
+
+        # HuggingFace embeddings
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+
+        self.vectorstore = None
+
+        self.parsed_papers = {}
+
+
+    # --------------------------------------------------------
+    # INGEST PAPERS
+    # --------------------------------------------------------
+
+    def ingest_papers(self, parsed_all: dict):
+
+        self.parsed_papers = parsed_all
+
+        documents = []
+
+        for paper_name, sections in parsed_all.items():
+
+            for sec_name, sec_content in sections.items():
+
+                if sec_content and sec_name != "Full Text":
+
+                    documents.append(
+                        Document(
+                            page_content=sec_content,
+                            metadata={
+                                "paper": paper_name,
+                                "section": sec_name
+                            }
+                        )
+                    )
+
+        if documents:
+
+            self.vectorstore = FAISS.from_documents(
+                documents,
+                self.embeddings
+            )
+
+
+    # --------------------------------------------------------
+    # EXTRACT SPECIFIC SECTIONS
+    # --------------------------------------------------------
+
+    def extract_specific_sections(
+        self,
+        paper_name: str,
+        sections: list
+    ) -> str:
+
+        if paper_name not in self.parsed_papers:
+            return "Paper not found."
+
+        paper_data = self.parsed_papers[paper_name]
+
+        output = f"## 📄 {paper_name}\n\n"
+
+        for sec in sections:
+
+            content = paper_data.get(
+                sec,
+                "Section not explicitly extracted."
+            )
+
+            output += (
+                f"### {sec}\n"
+                f"{content[:1200]}\n\n"
+                f"---\n"
+            )
+
+        return output
+
+
+    # --------------------------------------------------------
+    # COMPARATIVE MATRIX
+    # --------------------------------------------------------
+
+    def generate_comparative_matrix(
+        self,
+        aspect: str
+    ) -> str:
+
+        if not self.parsed_papers:
+            return "No papers ingested."
+
+        context = ""
+
+        for paper, sections in self.parsed_papers.items():
+
+            context += (
+                f"\n--- PAPER: {paper} ---\n"
+                f"{sections['Full Text'][:3000]}\n"
+            )
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                """
+                You are an expert academic research assistant.
+
+                Create a comparative Markdown matrix
+                evaluating the given research papers
+                based on the requested aspects.
+                """
+            ),
+            (
+                "human",
+                """
+                Aspects to compare:
+                {aspect}
+
+                Papers Context:
+                {context}
+                """
+            )
+        ])
+
+        chain = (
+            prompt
+            | self.llm
+            | StrOutputParser()
+        )
+
+        return chain.invoke({
+            "aspect": aspect,
+            "context": context
+        })
+
+
+    # --------------------------------------------------------
+    # RESEARCH GAP ANALYSIS
+    # --------------------------------------------------------
+
+    def identify_research_gaps(self) -> str:
+
+        if not self.parsed_papers:
+            return "No papers ingested."
+
+        context = ""
+
+        for paper, sections in self.parsed_papers.items():
+
+            context += (
+                f"\n--- PAPER: {paper} ---\n"
+                f"{sections.get('Discussion & Gaps', '')}\n"
+            )
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                """
+                You are a senior academic reviewer.
+
+                Identify major research gaps,
+                limitations, and future directions
+                from these papers.
+                """
+            ),
+            (
+                "human",
+                """
+                Papers Context:
+
+                {context}
+                """
+            )
+        ])
+
+        chain = (
+            prompt
+            | self.llm
+            | StrOutputParser()
+        )
+
+        return chain.invoke({
+            "context": context
+        })
+
+
+    # --------------------------------------------------------
+    # RAG QUESTION ANSWERING
+    # --------------------------------------------------------
+
+    def query_rag(
+        self,
+        query: str,
+        section_filter: str
+    ) -> str:
+
+        if not self.vectorstore:
+            return "Vector store is not initialized."
+
+        # Retrieve documents
+        docs = self.vectorstore.similarity_search(
+            query,
+            k=4
+        )
+
+        # Apply section filtering manually
+        if section_filter != "All":
+
+            docs = [
+                doc for doc in docs
+                if doc.metadata.get("section") == section_filter
+            ]
+
+        if not docs:
+            return (
+                "No relevant information found "
+                "for the selected section."
+            )
+
+        retrieved_text = "\n\n".join(
+            [
+                (
+                    f"[{d.metadata.get('paper')} - "
+                    f"{d.metadata.get('section')}]\n"
+                    f"{d.page_content}"
+                )
+                for d in docs
+            ]
+        )
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                """
+                Answer the user's question accurately
+                using ONLY the retrieved paper context.
+
+                Cite the paper name where applicable.
+
+                If the answer is not available in the
+                retrieved context, say so clearly.
+                """
+            ),
+            (
+                "human",
+                """
+                Context:
+
+                {context}
+
+                Question:
+                {question}
+                """
+            )
+        ])
+
+        chain = (
+            prompt
+            | self.llm
+            | StrOutputParser()
+        )
+
+        return chain.invoke({
+            "context": retrieved_text,
+            "question": query
+        })
+
+
+# ============================================================
+# 3. INITIALIZE RAG
+# ============================================================
+
 def initialize_rag(files, api_key):
 
     if not api_key:
-        st.session_state.status_msg = "⚠️ Please enter a valid Groq API Key."
+
+        st.session_state.status_msg = (
+            "⚠️ Please enter a valid Groq API Key."
+        )
+
         return
 
     if not files:
-        st.session_state.status_msg = "⚠️ Please upload at least one PDF paper."
+
+        st.session_state.status_msg = (
+            "⚠️ Please upload at least one PDF paper."
+        )
+
         return
 
     try:
-        # Initialize backend RAG system
+
+        # Create RAG system
         rag_system = PaperAnalysisRAG(
             groq_api_key=api_key
         )
 
         parsed_all = {}
 
-        for file in files:
+        progress = st.progress(0)
+
+        for i, file in enumerate(files):
+
             paper_name = file.name
 
-            # Extract sections from uploaded PDF
-            sections = extract_structured_sections(file)
+            # Save uploaded Streamlit file
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".pdf"
+            ) as tmp:
 
-            parsed_all[paper_name] = sections
+                tmp.write(file.getbuffer())
+                temp_path = tmp.name
 
-        # Ingest papers into RAG
+            try:
+
+                # Extract PDF sections
+                sections = extract_structured_sections(
+                    temp_path
+                )
+
+                parsed_all[paper_name] = sections
+
+            finally:
+
+                # Remove temporary file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+            progress.progress(
+                (i + 1) / len(files)
+            )
+
+        # Ingest papers into FAISS
         rag_system.ingest_papers(parsed_all)
 
-        # Save in Streamlit session
+        # Save to session
         st.session_state.rag_system = rag_system
-        st.session_state.paper_list = list(parsed_all.keys())
+
+        st.session_state.paper_list = list(
+            parsed_all.keys()
+        )
 
         st.session_state.status_msg = (
             f"✅ Processed {len(files)} paper(s). "
@@ -81,84 +518,120 @@ def initialize_rag(files, api_key):
         )
 
     except Exception as e:
+
         st.session_state.status_msg = (
             f"❌ RAG initialization failed: "
             f"{type(e).__name__}: {str(e)}"
         )
 
-def extract_sections_ui(paper_name, sections):
-    if not st.session_state.rag_system:
-        return "⚠️ Please initialize the system first."
-    return st.session_state.rag_system.extract_specific_sections(paper_name, sections)
 
-def run_comparison(aspect):
-    if not st.session_state.rag_system:
-        return "⚠️ Please initialize the system first."
-    return st.session_state.rag_system.generate_comparative_matrix(aspect)
+# ============================================================
+# 4. PAGE HEADER
+# ============================================================
 
-def run_gap_analysis():
-    if not st.session_state.rag_system:
-        return "⚠️ Please initialize the system first."
-    return st.session_state.rag_system.identify_research_gaps()
+st.title(
+    "📚 Multi-Paper Academic RAG & "
+    "Research Gap Explorer"
+)
 
-def answer_query(query, section_filter):
-    if not st.session_state.rag_system:
-        return "⚠️ Please initialize the system first."
-    return st.session_state.rag_system.query_rag(query, section_filter)
+st.caption(
+    "Powered by Groq + LangChain + FAISS + "
+    "HuggingFace Embeddings"
+)
 
-def explore_external_papers(topic):
-    if not topic:
-        return "⚠️ Please enter a search topic."
-    
-    arxiv_res = search_arxiv_papers(topic)
-    web_res = search_similar_online_papers(topic)
 
-    out = "### Relevant arXiv Papers\n"
-    for p in arxiv_res:
-        out += f"- **[{p['title']}]({p['url']})** ({p['published']})\n  *{p['summary']}*\n\n"
+# ============================================================
+# SIDEBAR
+# ============================================================
 
-    out += "\n### Related Web & OpenReview Papers\n"
-    for w in web_res:
-        out += f"- **[{w['title']}]({w['link']})**\n  {w['snippet']}\n\n"
-    return out
+with st.sidebar:
 
-# ==============================================================================
-# 3. TOP CONTROLS & INGESTION
-# ==============================================================================
-col1, col2 = st.columns([1, 2])
+    st.header("⚙️ RAG Configuration")
 
-with col1:
     api_key_input = st.text_input(
-        label="Groq API Key",
+        "Groq API Key",
         type="password",
         value=DEFAULT_GROQ_KEY,
         placeholder="gsk_..."
     )
 
-with col2:
-    file_uploader = st.file_uploader(
-        label="Upload PDF Papers",
-        type=["pdf"],
-        accept_multiple_files=True
+    st.markdown("---")
+
+    st.info(
+        """
+        Upload one or more research papers
+        and initialize the RAG engine.
+
+        The system can then:
+
+        • Extract paper sections
+        • Compare papers
+        • Find research gaps
+        • Answer questions using RAG
+        • Discover similar papers
+        """
     )
 
-if st.button("🚀 Ingest Papers", type="primary", use_container_width=True):
-    with st.spinner("Ingesting and vectorizing papers..."):
-        initialize_rag(file_uploader, api_key_input)
 
-# Display System Status
-if "✅" in st.session_state.status_msg:
-    st.success(st.session_state.status_msg)
-elif "⚠️" in st.session_state.status_msg:
-    st.warning(st.session_state.status_msg)
-else:
-    st.info(st.session_state.status_msg)
+# ============================================================
+# PDF UPLOAD
+# ============================================================
 
-st.markdown("---")
+st.subheader("📄 Upload Research Papers")
 
-# ==============================================================================
-# 4. STREAMLIT TABS UI
-# ==============================================================================
+uploaded_files = st.file_uploader(
+    "Upload PDF Papers",
+    type=["pdf"],
+    accept_multiple_files=True
+)
+
+
+# ============================================================
+# INGEST BUTTON
+# ============================================================
+
+if st.button(
+    "🚀 Ingest Papers",
+    type="primary",
+    use_container_width=True
+):
+
+    initialize_rag(
+        uploaded_files,
+        api_key_input
+    )
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+if st.session_state.status_msg:
+
+    st.info(
+        st.session_state.status_msg
+    )
+
+
+# ============================================================
+# CHECK RAG STATUS
+# ============================================================
+
+rag_system = st.session_state.rag_system
+
+
+if rag_system:
+
+    st.success(
+        f"RAG system ready with "
+        f"{len(st.session_state.paper_list)} paper(s)."
+    )
+
+
+# ============================================================
+# TABS
+# ============================================================
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1. Extract Sections",
     "2. Comparative Analysis",
@@ -167,90 +640,281 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "5. Discover Similar Papers"
 ])
 
-# ------------------------------------------------------------------------------
-# TAB 1: Extract Sections
-# ------------------------------------------------------------------------------
+
+# ============================================================
+# TAB 1 - EXTRACT SECTIONS
+# ============================================================
+
 with tab1:
-    st.subheader("Extract Specific Paper Sections")
-    col_p, col_s = st.columns([1, 2])
-    
-    with col_p:
-        paper_dropdown = st.selectbox(
-            label="Select Paper",
-            options=st.session_state.paper_list,
-            disabled=len(st.session_state.paper_list) == 0
-        )
-    with col_s:
-        section_selector = st.multiselect(
-            label="Select Sections to Inspect",
-            options=["Abstract", "Introduction", "Related Work", "Methodology", "Results", "Discussion & Gaps", "Conclusion"],
-            default=["Abstract", "Methodology", "Results"]
+
+    st.header("📑 Extract Paper Sections")
+
+    if not rag_system:
+
+        st.warning(
+            "Please upload papers and click "
+            "**Ingest Papers** first."
         )
 
-    if st.button("Extract Selected Sections"):
-        if paper_dropdown:
-            with st.spinner("Extracting..."):
-                result = extract_sections_ui(paper_dropdown, section_selector)
+    else:
+
+        selected_paper = st.selectbox(
+            "Select Paper",
+            st.session_state.paper_list
+        )
+
+        selected_sections = st.multiselect(
+            "Select Sections to Inspect",
+            [
+                "Abstract",
+                "Introduction",
+                "Related Work",
+                "Methodology",
+                "Results",
+                "Discussion & Gaps",
+                "Conclusion"
+            ],
+            default=[
+                "Abstract",
+                "Methodology",
+                "Results"
+            ]
+        )
+
+        if st.button(
+            "🔍 Extract Selected Sections",
+            key="extract_sections"
+        ):
+
+            if not selected_sections:
+
+                st.warning(
+                    "Please select at least one section."
+                )
+
+            else:
+
+                result = rag_system.extract_specific_sections(
+                    selected_paper,
+                    selected_sections
+                )
+
                 st.markdown(result)
-        else:
-            st.warning("Please upload and ingest papers first.")
 
-# ------------------------------------------------------------------------------
-# TAB 2: Comparative Analysis
-# ------------------------------------------------------------------------------
+
+# ============================================================
+# TAB 2 - COMPARATIVE ANALYSIS
+# ============================================================
+
 with tab2:
-    st.subheader("Cross-Paper Comparative Analysis")
-    aspect_input = st.text_input(
-        label="Comparison Focus",
-        value="Methodology, Datasets, Models, and Results"
-    )
-    if st.button("Generate Comparison Table", type="primary"):
-        with st.spinner("Generating matrix..."):
-            comparison_res = run_comparison(aspect_input)
-            st.markdown(comparison_res)
 
-# ------------------------------------------------------------------------------
-# TAB 3: Research Gap Finder
-# ------------------------------------------------------------------------------
+    st.header("📊 Comparative Analysis")
+
+    if not rag_system:
+
+        st.warning(
+            "Please initialize the RAG system first."
+        )
+
+    else:
+
+        aspect = st.text_input(
+            "Comparison Focus",
+            value=(
+                "Methodology, Datasets, "
+                "Models, and Results"
+            )
+        )
+
+        if st.button(
+            "📊 Generate Comparison Table",
+            type="primary",
+            key="comparison"
+        ):
+
+            with st.spinner(
+                "Analyzing research papers..."
+            ):
+
+                result = (
+                    rag_system
+                    .generate_comparative_matrix(
+                        aspect
+                    )
+                )
+
+            st.markdown(result)
+
+
+# ============================================================
+# TAB 3 - RESEARCH GAP FINDER
+# ============================================================
+
 with tab3:
-    st.subheader("Research Gap & Future Work Identifier")
-    if st.button("Analyze Gaps & Future Work", type="primary"):
-        with st.spinner("Identifying research gaps..."):
-            gap_res = run_gap_analysis()
-            st.markdown(gap_res)
 
-# ------------------------------------------------------------------------------
-# TAB 4: Deep Q&A (RAG)
-# ------------------------------------------------------------------------------
+    st.header("🔎 Research Gap Finder")
+
+    st.write(
+        "Identify limitations, research gaps "
+        "and future research directions."
+    )
+
+    if not rag_system:
+
+        st.warning(
+            "Please initialize the RAG system first."
+        )
+
+    else:
+
+        if st.button(
+            "🧠 Analyze Gaps & Future Work",
+            type="primary",
+            key="gap_analysis"
+        ):
+
+            with st.spinner(
+                "Analyzing research gaps..."
+            ):
+
+                result = (
+                    rag_system
+                    .identify_research_gaps()
+                )
+
+            st.markdown(result)
+
+
+# ============================================================
+# TAB 4 - DEEP Q&A
+# ============================================================
+
 with tab4:
-    st.subheader("Context-Aware RAG Engine")
-    query_input = st.text_input(
-        label="Enter Question",
-        placeholder="What are the main architectural limitations mentioned?"
-    )
-    section_filter = st.selectbox(
-        label="Filter Context by Section",
-        options=["All", "Abstract", "Introduction", "Methodology", "Results", "Discussion & Gaps"],
-        index=0
-    )
-    if st.button("Ask RAG Engine"):
-        if query_input:
-            with st.spinner("Querying system..."):
-                qa_res = answer_query(query_input, section_filter)
-                st.markdown(qa_res)
-        else:
-            st.warning("Please enter a question.")
 
-# ------------------------------------------------------------------------------
-# TAB 5: Discover Similar Papers
-# ------------------------------------------------------------------------------
+    st.header("🤖 Deep Q&A (RAG)")
+
+    if not rag_system:
+
+        st.warning(
+            "Please initialize the RAG system first."
+        )
+
+    else:
+
+        query = st.text_area(
+            "Enter Question",
+            placeholder=(
+                "What are the main architectural "
+                "limitations mentioned?"
+            )
+        )
+
+        section_filter = st.selectbox(
+            "Filter Context by Section",
+            [
+                "All",
+                "Abstract",
+                "Introduction",
+                "Methodology",
+                "Results",
+                "Discussion & Gaps"
+            ]
+        )
+
+        if st.button(
+            "💬 Ask RAG Engine",
+            type="primary",
+            key="rag_question"
+        ):
+
+            if not query.strip():
+
+                st.warning(
+                    "Please enter a question."
+                )
+
+            else:
+
+                with st.spinner(
+                    "Searching papers and generating answer..."
+                ):
+
+                    answer = rag_system.query_rag(
+                        query,
+                        section_filter
+                    )
+
+                st.markdown("### Answer")
+
+                st.markdown(answer)
+
+
+# ============================================================
+# TAB 5 - DISCOVER SIMILAR PAPERS
+# ============================================================
+
 with tab5:
-    st.subheader("External Literature Discovery")
-    topic_input = st.text_input(
-        label="Search Query / Research Topic",
-        placeholder="Multi-agent systems for PCB design"
+
+    st.header("🌐 Discover Similar Papers")
+
+    topic = st.text_input(
+        "Search Query / Research Topic",
+        placeholder=(
+            "Multi-agent systems for PCB design"
+        )
     )
-    if st.button("Find Similar Papers (arXiv + Web)"):
-        with st.spinner("Searching arXiv & Web..."):
-            discovery_res = explore_external_papers(topic_input)
-            st.markdown(discovery_res)
+
+    if st.button(
+        "🔎 Find Similar Papers",
+        type="primary",
+        key="discover"
+    ):
+
+        if not topic.strip():
+
+            st.warning(
+                "Please enter a research topic."
+            )
+
+        else:
+
+            with st.spinner(
+                "Searching for related papers..."
+            ):
+
+                arxiv_res = search_arxiv_papers(
+                    topic
+                )
+
+                web_res = search_similar_online_papers(
+                    topic
+                )
+
+            st.subheader(
+                "📚 Relevant arXiv Papers"
+            )
+
+            for p in arxiv_res:
+
+                st.markdown(
+                    f"""
+                    **[{p['title']}]({p['url']})**
+                    ({p['published']})
+
+                    *{p['summary']}*
+                    """
+                )
+
+            st.subheader(
+                "🌐 Related Web & OpenReview Papers"
+            )
+
+            for w in web_res:
+
+                st.markdown(
+                    f"""
+                    **[{w['title']}]({w['link']})**
+
+                    {w['snippet']}
+                    """
+                )
