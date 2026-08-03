@@ -29,29 +29,48 @@ DEFAULT_GROQ_KEY = os.getenv("GROQ_API_KEY", "")
 # 2. LOGIC & HANDLER FUNCTIONS
 # ==============================================================================
 def initialize_rag(files, api_key):
+
     if not api_key:
         st.session_state.status_msg = "⚠️ Please enter a valid Groq API Key."
         return
+
     if not files:
         st.session_state.status_msg = "⚠️ Please upload at least one PDF paper."
         return
 
-    # Instantiate your backend RAG system
-    rag_system = PaperAnalysisRAG(groq_api_key=api_key)
-    parsed_all = {}
+    try:
+        # Initialize backend RAG system
+        rag_system = PaperAnalysisRAG(
+            groq_api_key=api_key
+        )
 
-    for file in files:
-        # Streamlit files are UploadedFile objects; pass them to your extraction logic
-        paper_name = file.name
-        sections = extract_structured_sections(file)
-        parsed_all[paper_name] = sections
+        parsed_all = {}
 
-    rag_system.ingest_papers(parsed_all)
+        for file in files:
+            paper_name = file.name
 
-    # Save system instance & papers in session state
-    st.session_state.rag_system = rag_system
-    st.session_state.paper_list = list(parsed_all.keys())
-    st.session_state.status_msg = f"✅ Processed {len(files)} paper(s). Vector store ready!"
+            # Extract sections from uploaded PDF
+            sections = extract_structured_sections(file)
+
+            parsed_all[paper_name] = sections
+
+        # Ingest papers into RAG
+        rag_system.ingest_papers(parsed_all)
+
+        # Save in Streamlit session
+        st.session_state.rag_system = rag_system
+        st.session_state.paper_list = list(parsed_all.keys())
+
+        st.session_state.status_msg = (
+            f"✅ Processed {len(files)} paper(s). "
+            "Vector store ready!"
+        )
+
+    except Exception as e:
+        st.session_state.status_msg = (
+            f"❌ RAG initialization failed: "
+            f"{type(e).__name__}: {str(e)}"
+        )
 
 def extract_sections_ui(paper_name, sections):
     if not st.session_state.rag_system:
